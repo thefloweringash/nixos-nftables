@@ -37,7 +37,6 @@ def rule_owner:
 
 .nftables
 | remove_handles
-| map(downcase_chains)
 | seperate_elements
 | .table |= sort
 | .chain |= sort

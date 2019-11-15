@@ -11,17 +11,38 @@ let
   # This is ordered to match iptables-save, so the diffs are smaller.
   # Order is not important once this module is no longer an active
   # porting job.
-  defaultConfigs = [
-    "ipv4-nat.nft"
-    "ipv4-raw.nft"
-    "ipv4-filter.nft"
-    # "ipv4-mangle.nft"
-  ] ++ optionals config.networking.enableIPv6 [
-    "ipv6-filter.nft"
-    # "ipv6-mangle.nft"
-    # "ipv6-nat.nft"
-    "ipv6-raw.nft"
-  ];
+  defaultConfigs = [];
+
+  tableConfig = ''
+    table nat {
+      chain PREROUTING  { type nat hook prerouting priority -100; }
+      chain INPUT       { type nat hook input priority 100; }
+      chain OUTPUT      { type nat hook output priority -100; }
+      chain POSTROUTING { type nat hook postrouting priority 100; }
+    }
+
+    table raw {
+      chain PREROUTING { type filter hook prerouting priority -300; }
+      chain OUTPUT     { type filter hook output priority -300; }
+    }
+
+    table filter {
+      chain INPUT   { type filter hook input priority 0; }
+      chain FORWARD { type filter hook forward priority 0; }
+      chain OUTPUT  { type filter hook output priority 0; }
+    }
+  '' + optionalString config.networking.enableIPv6 ''
+    table ip6 filter {
+      chain INPUT   { type filter hook input priority 0; }
+      chain FORWARD { type filter hook forward priority 0; }
+      chain OUTPUT  { type filter hook output priority 0; }
+    }
+
+    table ip6 raw {
+      chain PREROUTING { type filter hook prerouting priority -300; }
+      chain OUTPUT     { type filter hook output priority -300; }
+    }
+  '';
 
   inherit (config.boot.kernelPackages) kernel;
 
@@ -199,6 +220,8 @@ let
   firewallCfg = pkgs.writeText "rules.nft" ''
     flush ruleset
 
+    ${tableConfig}
+
     ${flip concatMapStrings defaultConfigs (configFile: ''
       include "${pkgs.nftables}/etc/nftables/${configFile}"
     '')}
@@ -208,9 +231,9 @@ let
     ${add46Entity "filter" nixos-fw-log-refuse}
     ${optionalString (kernelHasRPFilter && (cfg.checkReversePath != false)) ''
       ${add46Entity "raw" nixos-fw-rpfilter}
-      add rule ip raw prerouting counter jump nixos-fw-rpfilter
+      add rule ip raw PREROUTING counter jump nixos-fw-rpfilter
       ${optionalString config.networking.enableIPv6 ''
-        add rule ip6 raw prerouting counter jump nixos-fw-rpfilter
+        add rule ip6 raw PREROUTING counter jump nixos-fw-rpfilter
       ''}
     ''}
     ${add46Entity "filter" nixos-fw}
@@ -222,9 +245,9 @@ let
       add rule ip6 filter nixos-fw counter jump nixos-fw-log-refuse
     ''}
 
-    add rule ip filter input counter jump nixos-fw
+    add rule ip filter INPUT counter jump nixos-fw
     ${optionalString config.networking.enableIPv6 ''
-      add rule ip6 filter input counter jump nixos-fw
+      add rule ip6 filter INPUT counter jump nixos-fw
     ''}
   '';
 in

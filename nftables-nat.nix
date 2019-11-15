@@ -58,7 +58,7 @@ in
           destinationPorts = if (m == null) then throw "bad ip:ports `${fwd.destination}'" else elemAt m 1;
         in ''
           # Allow connections to ${loopbackip}:${nftSourcePort} from the host itself
-          add rule ip nat output \
+          add rule ip nat OUTPUT \
             ip daddr ${loopbackip} ${fwd.proto} dport ${nftSourcePort} \
             counter dnat to ${fwd.destination}
 
@@ -80,8 +80,8 @@ in
     ''}
 
     # Append our chains to the nat tables
-    add rule ip nat prerouting counter jump nixos-nat-pre
-    add rule ip nat postrouting counter jump nixos-nat-post
+    add rule ip nat PREROUTING counter jump nixos-nat-pre
+    add rule ip nat POSTROUTING counter jump nixos-nat-post
   '';
   };
 }
