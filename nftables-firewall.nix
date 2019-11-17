@@ -2,7 +2,7 @@
 
 let
   inherit (lib) mkOption types flip concatMapStrings optionalString
-    concatStrings mapAttrsToList mapAttrs optionals;
+    concatStrings mapAttrsToList mapAttrs optionals concatMap;
 
   inherit (import ./options.nix { inherit lib; }) commonOptions;
 
@@ -22,6 +22,8 @@ let
     # "ipv6-nat.nft"
     "ipv6-raw.nft"
   ];
+
+  families = [ "ip" ] ++ optionals config.networking.enableIPv6 [ "ip6" ];
 
   inherit (config.boot.kernelPackages) kernel;
 
@@ -196,11 +198,26 @@ let
     }
   '';
 
-  firewallCfg = pkgs.writeText "rules.nft" ''
-    flush ruleset
+  addFamilies = xs: concatMap (x: map (family: x // { inherit family; }) families) xs;
 
+  createdChains = addFamilies (
+    [
+      { table = "filter"; chain = "nixos-fw-accept"; }
+      { table = "filter"; chain = "nixos-fw-refuse"; }
+      { table = "filter"; chain = "nixos-fw-log-refuse"; }
+    ] ++ optionals cfg.checkReversePath [
+      { table = "raw"; chain = "nixos-fw-rpfilter"; }
+    ]
+  );
+
+  firewallRules = pkgs.writeText "rules.nft" ''
     ${flip concatMapStrings defaultConfigs (configFile: ''
       include "${pkgs.nftables}/etc/nftables/${configFile}"
+    '')}
+
+    ${flip concatMapStrings createdChains ({ family, table, chain }: ''
+      add chain ${family} ${table} ${chain}
+      flush chain ${family} ${table} ${chain}
     '')}
 
     ${add46Entity "filter" nixos-fw-accept}
@@ -208,10 +225,6 @@ let
     ${add46Entity "filter" nixos-fw-log-refuse}
     ${optionalString (kernelHasRPFilter && (cfg.checkReversePath != false)) ''
       ${add46Entity "raw" nixos-fw-rpfilter}
-      add rule ip raw prerouting counter jump nixos-fw-rpfilter
-      ${optionalString config.networking.enableIPv6 ''
-        add rule ip6 raw prerouting counter jump nixos-fw-rpfilter
-      ''}
     ''}
     ${add46Entity "filter" nixos-fw}
 
@@ -221,12 +234,20 @@ let
     ${optionalString config.networking.enableIPv6 ''
       add rule ip6 filter nixos-fw counter jump nixos-fw-log-refuse
     ''}
-
-    add rule ip filter input counter jump nixos-fw
-    ${optionalString config.networking.enableIPv6 ''
-      add rule ip6 filter input counter jump nixos-fw
-    ''}
   '';
+
+  hooks = addFamilies (
+    [ { table = "filter"; chain = "input"; hook = "nixos-fw"; } ]
+    ++ optionals cfg.checkReversePath [
+      { table = "raw"; chain = "prerouting"; hook = "nixos-fw-rpfilter"; }
+    ]
+  );
+
+  activateRules = pkgs.writeText "activate.nft" (flip concatMapStrings hooks (
+    { family, table, chain, hook }: ''
+      add rule ${family} ${table} ${chain} counter jump ${hook}
+    ''
+  ));
 in
 {
   options = {
@@ -237,6 +258,29 @@ in
   };
 
   config = {
-    build.debug.nftables.rulesetFile = firewallCfg;
+    systemd.services.new-firewall = {
+      after = [ "nftables.service" ];
+      requires = [ "nftables.service" ];
+      serviceConfig = {
+        ExecStart = pkgs.writeScript "firewall-start" ''
+          #!${pkgs.runtimeShell} -e
+          nft --check -f ${firewallRules}
+          cat ${firewallRules} ${activateRules} | nft -f -
+        '';
+        ExecReload = pkgs.writeScript "firewall-reload" ''
+          #!${pkgs.runtimeShell} -e
+          # compute missing hook rules
+          nft --check -f ${firewallRules}
+          cat ${firewallRules} reactivate.nft | nft -f -
+        '';
+        ExecStop = pkgs.writeScript "firewall-stop" ''
+          #!${pkgs.runtimeShell} -e
+          # compute existing hook rules
+          cat unhook.nft {deleteRules} | nft -f -
+        '';
+      };
+    };
+
+    build.debug.nftables.rulesetFile = firewallRules;
   };
 }

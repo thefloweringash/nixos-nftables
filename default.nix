@@ -48,21 +48,42 @@ let
     let nixosConfig = { imports = [ cfg ./nftables-firewall.nix ./nftables-nat.nix ]; };
     in canonicalise name ((nixos nixosConfig).config.build.debug.nftables.rulesetFile);
 
+  new = name: cfg:
+    let
+      nixosConfig = { imports = [ cfg ./nftables-firewall.nix ./nftables-nat.nix ]; };
+      svcCfg = (nixos nixosConfig).config.systemd.services.new-firewall.serviceConfig;
+      generatedRules = vmTools.runInLinuxVM (
+        runCommand "generated-mutable-${name}" {
+          nativeBuildInputs = [ nftables utillinux ];
+          startScript = svcCfg.ExecStart;
+          reloadScript = svcCfg.ExecReload;
+          stopScript = svcCfg.ExecStop;
+        } ''
+          mount
+          mkdir -p /proc
+          ln -sf /proc/self/fd/0 /dev/stdin
+          ls -lh /dev/stdin
+          sh -x "$startScript"
+          nft list ruleset > $out/rules.nft
+        ''
+      );
+    in canonicalise name [ "${generatedRules}/rules.nft" ];
+
   diffConfigs = cfgs:
     runCommand "diff" {
       nativeBuildInputs = [ diffoscope ];
     } ''
 
-      mkdir -p $out/{translated,generated}
+      mkdir -p $out/{translated,new}
       ${concatStrings (flip mapAttrsToList cfgs (name: cfg: ''
         cp ${translate name cfg}/rules.json $out/translated/${name}.json
-        cp ${generate name cfg}/rules.json  $out/generated/${name}.json
+        cp ${new name cfg}/rules.json  $out/new/${name}.json
       ''))}
 
       rc=0
       diffoscope --html $out/diff.html \
         --no-default-limits --output-empty \
-        $out/translated $out/generated || rc=$?
+        $out/translated $out/new || rc=$?
       if [ $rc -ne 1 ] && [ $rc -ne 0 ]; then
         exit $rc
       fi
@@ -148,4 +169,6 @@ in
   translated = mapAttrs translate testCases;
 
   generated = mapAttrs generate testCases;
+
+  new = mapAttrs new testCases;
 }
