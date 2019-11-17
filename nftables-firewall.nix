@@ -7,6 +7,7 @@ let
   inherit (import ./options.nix { inherit lib; }) commonOptions;
 
   cfg = config.networking.firewall;
+  extraCfg = config.build.debug.nftables;
 
   # This is ordered to match iptables-save, so the diffs are smaller.
   # Order is not important once this module is no longer an active
@@ -198,9 +199,11 @@ let
     }
   '';
 
-  addFamilies = xs: concatMap (x: map (family: x // { inherit family; }) families) xs;
+  # Cover over `ip` vs `ip6`
+  addEnabledFamilies = xs:
+    concatMap (x: map (family: x // { inherit family; }) families) xs;
 
-  createdChains = addFamilies (
+  constantChains = addEnabledFamilies (
     [
       { table = "filter"; chain = "nixos-fw"; }
       { table = "filter"; chain = "nixos-fw-accept"; }
@@ -211,14 +214,19 @@ let
     ]
   );
 
-  createdChainsJSON = pkgs.writeText "chains.json" (builtins.toJSON createdChains);
+  constantHooks = addEnabledFamilies (
+    [ { table = "filter"; chain = "input"; hook = "nixos-fw"; } ]
+    ++ optionals cfg.checkReversePath [
+      { table = "raw"; chain = "prerouting"; hook = "nixos-fw-rpfilter"; }
+    ]
+  );
 
   firewallRules = pkgs.writeText "rules.nft" ''
     ${flip concatMapStrings defaultConfigs (configFile: ''
       include "${pkgs.nftables}/etc/nftables/${configFile}"
     '')}
 
-    ${flip concatMapStrings createdChains ({ family, table, chain }: ''
+    ${flip concatMapStrings extraCfg.chains ({ family, table, chain, ... }: ''
       add chain ${family} ${table} ${chain}
       flush chain ${family} ${table} ${chain}
     '')}
@@ -239,28 +247,49 @@ let
     ''}
   '';
 
-  hooks = addFamilies (
-    [ { table = "filter"; chain = "input"; hook = "nixos-fw"; } ]
-    ++ optionals cfg.checkReversePath [
-      { table = "raw"; chain = "prerouting"; hook = "nixos-fw-rpfilter"; }
-    ]
-  );
-
-  startRules = pkgs.writeText "start.nft" (flip concatMapStrings hooks (
-    { family, table, chain, hook }: ''
+  startRules = pkgs.writeText "start.nft" (flip concatMapStrings extraCfg.hooks (
+    { family, table, chain, hook, ... }: ''
       add rule ${family} ${table} ${chain} counter jump ${hook}
     ''
   ));
 
-  hooksJSON = pkgs.writeText "hooks.json" (builtins.toJSON hooks);
+  hooksJSON = pkgs.writeText "hooks.json" (builtins.toJSON extraCfg.hooks);
+  chainsJSON = pkgs.writeText "chains.json" (builtins.toJSON extraCfg.chains);
+
+  hookType = {
+    options = {
+      table = mkOption { type = types.str; };
+      family = mkOption { type = types.str; };
+      chain = mkOption { type = types.str; };
+      hook = mkOption { type = types.str; };
+    };
+  };
+
+  chainType = {
+    options = {
+      table = mkOption { type = types.str; };
+      family = mkOption { type = types.str; };
+      chain = mkOption { type = types.str; };
+    };
+  };
+
 in
 {
   options = {
     build.debug.nftables = {
       rulesetFile = mkOption { type = types.path; };
       extraCommands = mkOption { type = types.lines; default = ""; };
-      hooks = mkOption { type = types.path; };
-      chains = mkOption { type = types.path; };
+      hooksFile = mkOption { type = types.path; };
+      chainsFile = mkOption { type = types.path; };
+
+      # Chains are created to hold rules. They're pretty
+      # arbitrary. All rules managed by declarative config must be in
+      # one of these managed chains.
+      chains = mkOption { type = types.listOf (types.submodule chainType); };
+
+      # Hooks attach global chains to the declarative chains in
+      # `chains`.
+      hooks = mkOption { type = types.listOf (types.submodule hookType); };
     };
   };
 
@@ -285,7 +314,7 @@ in
           #!${pkgs.runtimeShell} -e
           nft --check -f ${firewallRules}
           cat ${firewallRules} ${startRules} | nft -f -
-          ln -sfT ${createdChainsJSON} startup-chains.json
+          ln -sfT ${chainsJSON} startup-chains.json
         '';
         ExecReload = pkgs.writeScript "firewall-reload" ''
           #!${pkgs.runtimeShell} -e
@@ -298,7 +327,7 @@ in
           nft-util remove-stale-chains \
             --state state.json \
             --old-chains startup-chains.json \
-            --chains ${createdChainsJSON} \
+            --chains ${chainsJSON} \
             > cleanup.nft
 
           nft-util ensure-hooks \
@@ -308,7 +337,7 @@ in
 
           cat ${firewallRules} cleanup.nft ensure.nft | nft -f -
 
-          ln -sfT ${createdChainsJSON} startup-chains.json
+          ln -sfT ${chainsJSON} startup-chains.json
         '';
         ExecStop = pkgs.writeScript "firewall-stop" ''
           #!${pkgs.runtimeShell} -e
@@ -332,8 +361,10 @@ in
 
     build.debug.nftables = {
       rulesetFile = firewallRules;
-      chains = createdChainsJSON;
-      hooks = hooksJSON;
+      hooks = constantHooks;
+      chains = constantChains;
+      chainsFile = chainsJSON;
+      hooksFile = hooksJSON;
     };
   };
 }

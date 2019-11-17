@@ -20,6 +20,14 @@ in
 {
 
   config = mkIf config.networking.nat.enable {
+    build.debug.nftables.chains = [
+      { family = "ip"; table = "nat"; chain = "nixos-nat-pre"; }
+      { family = "ip"; table = "nat"; chain = "nixos-nat-post"; }
+    ];
+    build.debug.nftables.hooks = [
+      { family = "ip"; table = "nat"; chain = "prerouting"; hook = "nixos-nat-pre"; }
+      { family = "ip"; table = "nat"; chain = "postrouting"; hook = "nixos-nat-post"; }
+    ];
     build.debug.nftables.extraCommands = ''
       table ip nat {
         chain nixos-nat-pre {
@@ -78,10 +86,6 @@ in
         iifname "${cfg.externalInterface}" \
         counter dnat to ${cfg.dmzHost}
     ''}
-
-    # Append our chains to the nat tables
-    add rule ip nat prerouting counter jump nixos-nat-pre
-    add rule ip nat postrouting counter jump nixos-nat-post
   '';
   };
 }
