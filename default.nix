@@ -70,7 +70,7 @@ let
     );
 
   newRulesAndState = name: cfg:
-    runNewFirewallScriptsInLinuxVM ''
+    runNewFirewallScriptsInLinuxVM name cfg ''
       sh -xe "$startScript"
       nft list ruleset > $out/rules.nft
       nft --json --handle list ruleset > $out/state.json
@@ -191,8 +191,8 @@ in
       nixosConfig = { imports = [ cfg ./nftables-firewall.nix ./nftables-nat.nix ]; };
     in pkgs.runCommand "ruby-test-inputs" {} ''
       mkdir $out
-      ln -s ${debug.chains} $out/chains.json
-      ln -s ${debug.hooks} $out/hooks.json
+      ln -s ${debug.chainsFile} $out/chains.json
+      ln -s ${debug.hooksFile} $out/hooks.json
       ln -s ${newRulesAndState name cfg}/state.json $out/state.json
   '';
 

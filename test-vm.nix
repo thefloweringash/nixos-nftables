@@ -15,6 +15,5 @@
 
     networking.firewall.enable = false;
     networking.nftables.enable = true;
-    networking.nftables.rulesetFile = config.build.debug.nftables.rulesetFile;
   };
 }
