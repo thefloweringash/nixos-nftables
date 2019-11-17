@@ -312,14 +312,16 @@ in
       serviceConfig = {
         ExecStart = pkgs.writeScript "firewall-start" ''
           #!${pkgs.runtimeShell} -e
-          nft --check -f ${firewallRules}
-          cat ${firewallRules} ${startRules} | nft -f -
+
+          echo '
+            include "${firewallRules}"
+            include "${startRules}"
+          ' | nft -f -
+
           ln -sfT ${chainsJSON} startup-chains.json
         '';
         ExecReload = pkgs.writeScript "firewall-reload" ''
           #!${pkgs.runtimeShell} -e
-          nft --check -f ${firewallRules}
-
           cd $RUNTIME_DIRECTORY
 
           nft --json list ruleset > state.json
@@ -335,7 +337,11 @@ in
             --hooks ${hooksJSON} \
             > ensure.nft
 
-          cat ${firewallRules} cleanup.nft ensure.nft | nft -f -
+          echo '
+            include "${firewallRules}"
+            include "./cleanup.nft"
+            include "./ensure.nft"
+          ' | nft -f -
 
           ln -sfT ${chainsJSON} startup-chains.json
         '';
