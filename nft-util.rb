@@ -136,7 +136,8 @@ def ensure_hooks(state:, hooks:)
 end
 
 def remove_stale_chains(state:, old_chain_names:, chain_names:)
-  remove_chains(state: state, chain_names: chain_names - old_chain_names)
+  stale_chain_names = old_chain_names - chain_names
+  remove_chains(state: state, chain_names: stale_chain_names)
 end
 
 def remove_chains(state:, chain_names:)

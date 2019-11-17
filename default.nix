@@ -44,14 +44,20 @@ let
       );
     in canonicalise name [ "${migrated}/nftables/ip4" "${migrated}/nftables/ip6" ];
 
+  nixosNew = cfg:
+    nixos { imports = [ cfg ./nftables-firewall.nix ./nftables-nat.nix ]; };
+
   generate = name: cfg:
-    let nixosConfig = { imports = [ cfg ./nftables-firewall.nix ./nftables-nat.nix ]; };
-    in canonicalise name ((nixos nixosConfig).config.build.debug.nftables.rulesetFile);
+    canonicalise name ((nixosNew cfg).config.build.debug.nftables.rulesetFile);
+
+  newScriptsSetup = ''
+    export RUNTIME_DIRECTORY=/tmp
+    ln -sf /proc/self/fd/0 /dev/stdin
+  '';
 
   runNewFirewallScriptsInLinuxVM = name: cfg: script:
     let
-      nixosConfig = { imports = [ cfg ./nftables-firewall.nix ./nftables-nat.nix ]; };
-      fwCfg = (nixos nixosConfig).config.systemd.services.new-firewall;
+      fwCfg = (nixosNew cfg).config.systemd.services.new-firewall;
       svcCfg = fwCfg.serviceConfig;
     in
     vmTools.runInLinuxVM (
@@ -60,13 +66,11 @@ let
         startScript = svcCfg.ExecStart;
         reloadScript = svcCfg.ExecReload;
         stopScript = svcCfg.ExecStop;
-      } (
-        ''
-          export PATH=${lib.makeBinPath [ fwCfg.path ]}:$PATH
-          export RUNTIME_DIRECTORY=/tmp
-          ln -sf /proc/self/fd/0 /dev/stdin
-        '' + script
-      )
+      } ''
+        ${newScriptsSetup}
+        export PATH=${lib.makeBinPath [ fwCfg.path ]}:$PATH
+        ${script}
+      ''
     );
 
   newRulesAndState = name: cfg:
@@ -187,14 +191,19 @@ in
     let
       name = "empty";
       cfg = testCases."${name}";
-      debug = (nixos nixosConfig).config.build.debug.nftables;
-      nixosConfig = { imports = [ cfg ./nftables-firewall.nix ./nftables-nat.nix ]; };
+      debug = (nixosNew cfg).config.build.debug.nftables;
     in pkgs.runCommand "ruby-test-inputs" {} ''
       mkdir $out
       ln -s ${debug.chainsFile} $out/chains.json
       ln -s ${debug.hooksFile} $out/hooks.json
       ln -s ${newRulesAndState name cfg}/state.json $out/state.json
   '';
+
+  doStart = flip mapAttrs testCases (name: cfg:
+    runNewFirewallScriptsInLinuxVM "do-start-${name}" cfg ''
+    sh -xe "$startScript"
+    nft list ruleset > $out/rules.nft
+  '');
 
   doStop = flip mapAttrs testCases (name: cfg:
     runNewFirewallScriptsInLinuxVM "do-stop-${name}" cfg ''
@@ -225,4 +234,22 @@ in
     sh -xe "$stopScript"
     nft list ruleset > $out/rules.nft
   '');
+
+  doTransition =
+    flip mapAttrs testCases (fromName: fromCfg:
+      flip mapAttrs testCases (toName: toCfg:
+        let
+          fwFrom = (nixosNew fromCfg).config.systemd.services.new-firewall;
+          fwTo = (nixosNew toCfg).config.systemd.services.new-firewall;
+        in vmTools.runInLinuxVM (
+          pkgs.runCommand "transition-${fromName}-to-${toName}" {} ''
+            export PATH=${lib.makeBinPath [ fwFrom.path ]}:$PATH
+            ${newScriptsSetup}
+            sh -xe ${fwFrom.serviceConfig.ExecStart}
+            sh -xe ${fwTo.serviceConfig.ExecReload}
+            nft list ruleset > $out/rules.nft
+          ''
+        )
+      )
+    );
 }
