@@ -48,25 +48,36 @@ let
     let nixosConfig = { imports = [ cfg ./nftables-firewall.nix ./nftables-nat.nix ]; };
     in canonicalise name ((nixos nixosConfig).config.build.debug.nftables.rulesetFile);
 
-  new = name: cfg:
+  runNewFirewallScriptsInLinuxVM = name: cfg: script:
     let
       nixosConfig = { imports = [ cfg ./nftables-firewall.nix ./nftables-nat.nix ]; };
-      svcCfg = (nixos nixosConfig).config.systemd.services.new-firewall.serviceConfig;
-      generatedRules = vmTools.runInLinuxVM (
-        runCommand "generated-mutable-${name}" {
-          nativeBuildInputs = [ nftables utillinux ];
-          startScript = svcCfg.ExecStart;
-          reloadScript = svcCfg.ExecReload;
-          stopScript = svcCfg.ExecStop;
-        } ''
-          mount
-          mkdir -p /proc
-          ln -sf /proc/self/fd/0 /dev/stdin
-          ls -lh /dev/stdin
-          sh -x "$startScript"
-          nft list ruleset > $out/rules.nft
+      fwCfg = (nixos nixosConfig).config.systemd.services.new-firewall;
+      svcCfg = fwCfg.serviceConfig;
+    in
+    vmTools.runInLinuxVM (
+      runCommand name {
+        nativeBuildInputs = [ nftables ];
+        startScript = svcCfg.ExecStart;
+        reloadScript = svcCfg.ExecReload;
+        stopScript = svcCfg.ExecStop;
+      } (
         ''
-      );
+          export PATH=${lib.makeBinPath [ fwCfg.path ]}:$PATH
+          export RUNTIME_DIRECTORY=/tmp
+          ln -sf /proc/self/fd/0 /dev/stdin
+        '' + script
+      )
+    );
+
+  newRulesAndState = name: cfg:
+    runNewFirewallScriptsInLinuxVM ''
+      sh -xe "$startScript"
+      nft list ruleset > $out/rules.nft
+      nft --json --handle list ruleset > $out/state.json
+    '';
+
+  new = name: cfg:
+    let generatedRules = newRulesAndState name cfg;
     in canonicalise name [ "${generatedRules}/rules.nft" ];
 
   diffConfigs = cfgs:
@@ -171,4 +182,47 @@ in
   generated = mapAttrs generate testCases;
 
   new = mapAttrs new testCases;
+
+  rubyTestInputs =
+    let
+      name = "empty";
+      cfg = testCases."${name}";
+      debug = (nixos nixosConfig).config.build.debug.nftables;
+      nixosConfig = { imports = [ cfg ./nftables-firewall.nix ./nftables-nat.nix ]; };
+    in pkgs.runCommand "ruby-test-inputs" {} ''
+      mkdir $out
+      ln -s ${debug.chains} $out/chains.json
+      ln -s ${debug.hooks} $out/hooks.json
+      ln -s ${newRulesAndState name cfg}/state.json $out/state.json
+  '';
+
+  doStop = flip mapAttrs testCases (name: cfg:
+    runNewFirewallScriptsInLinuxVM "do-stop-${name}" cfg ''
+    sh -xe "$startScript"
+    sh -xe "$stopScript"
+    nft list ruleset > $out/rules.nft
+  '');
+
+  doReload = flip mapAttrs testCases (name: cfg:
+    runNewFirewallScriptsInLinuxVM "do-stop-${name}" cfg ''
+    sh -xe "$startScript"
+    sh -xe "$reloadScript"
+    nft list ruleset > $out/rules.nft
+  '');
+
+  doReloadWithMissingHook = flip mapAttrs testCases (name: cfg:
+    runNewFirewallScriptsInLinuxVM "do-stop-${name}" cfg ''
+    sh -xe "$startScript"
+    nft flush chain ip filter input
+    sh -xe "$reloadScript"
+    nft list ruleset > $out/rules.nft
+  '');
+
+  doStopWithExtraJump = flip mapAttrs testCases (name: cfg:
+    runNewFirewallScriptsInLinuxVM "do-stop-${name}" cfg ''
+    sh -xe "$startScript"
+    nft add rule ip filter output jump nixos-fw-log-refuse
+    sh -xe "$stopScript"
+    nft list ruleset > $out/rules.nft
+  '');
 }

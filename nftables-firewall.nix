@@ -202,6 +202,7 @@ let
 
   createdChains = addFamilies (
     [
+      { table = "filter"; chain = "nixos-fw"; }
       { table = "filter"; chain = "nixos-fw-accept"; }
       { table = "filter"; chain = "nixos-fw-refuse"; }
       { table = "filter"; chain = "nixos-fw-log-refuse"; }
@@ -209,6 +210,8 @@ let
       { table = "raw"; chain = "nixos-fw-rpfilter"; }
     ]
   );
+
+  createdChainsJSON = pkgs.writeText "chains.json" (builtins.toJSON createdChains);
 
   firewallRules = pkgs.writeText "rules.nft" ''
     ${flip concatMapStrings defaultConfigs (configFile: ''
@@ -223,9 +226,9 @@ let
     ${add46Entity "filter" nixos-fw-accept}
     ${add46Entity "filter" nixos-fw-refuse}
     ${add46Entity "filter" nixos-fw-log-refuse}
-    ${optionalString (kernelHasRPFilter && (cfg.checkReversePath != false)) ''
-      ${add46Entity "raw" nixos-fw-rpfilter}
-    ''}
+    ${optionalString cfg.checkReversePath (
+      add46Entity "raw" nixos-fw-rpfilter
+    )}
     ${add46Entity "filter" nixos-fw}
 
     ${config.build.debug.nftables.extraCommands}
@@ -243,44 +246,85 @@ let
     ]
   );
 
-  activateRules = pkgs.writeText "activate.nft" (flip concatMapStrings hooks (
+  startRules = pkgs.writeText "start.nft" (flip concatMapStrings hooks (
     { family, table, chain, hook }: ''
       add rule ${family} ${table} ${chain} counter jump ${hook}
     ''
   ));
+
+  hooksJSON = pkgs.writeText "hooks.json" (builtins.toJSON hooks);
 in
 {
   options = {
     build.debug.nftables = {
-      rulesetFile = mkOption {type = types.path; };
+      rulesetFile = mkOption { type = types.path; };
       extraCommands = mkOption { type = types.lines; default = ""; };
+      hooks = mkOption { type = types.path; };
+      chains = mkOption { type = types.path; };
     };
   };
 
   config = {
+    networking.nftables.enable = true;
+    networking.nftables.ruleset = lib.mkDefault "";
+
     systemd.services.new-firewall = {
       after = [ "nftables.service" ];
       requires = [ "nftables.service" ];
+      before = [ "network-pre.target" ];
+      wants = [ "network-pre.target" ];
+      wantedBy = [ "multi-user.target" ];
+      path = [
+        pkgs.nftables
+        (pkgs.writeScriptBin "nft-util" ''
+          ${pkgs.ruby}/bin/ruby ${./nft-util.rb} "$@"
+        '')
+      ];
       serviceConfig = {
         ExecStart = pkgs.writeScript "firewall-start" ''
           #!${pkgs.runtimeShell} -e
           nft --check -f ${firewallRules}
-          cat ${firewallRules} ${activateRules} | nft -f -
+          cat ${firewallRules} ${startRules} | nft -f -
         '';
         ExecReload = pkgs.writeScript "firewall-reload" ''
           #!${pkgs.runtimeShell} -e
-          # compute missing hook rules
           nft --check -f ${firewallRules}
-          cat ${firewallRules} reactivate.nft | nft -f -
+
+          cd $RUNTIME_DIRECTORY
+
+          nft --json list ruleset > state.json
+
+          nft-util ensure-hooks \
+            --state state.json \
+            --hooks ${hooksJSON} \
+            > ensure.nft
+
+          cat ${firewallRules} ensure.nft | nft -f -
         '';
         ExecStop = pkgs.writeScript "firewall-stop" ''
           #!${pkgs.runtimeShell} -e
-          # compute existing hook rules
-          cat unhook.nft {deleteRules} | nft -f -
+          cd $RUNTIME_DIRECTORY
+
+          nft --json list ruleset > state.json
+
+          nft-util remove-chains \
+            --state state.json \
+            --chains ${createdChainsJSON} \
+            > stop.nft
+
+          nft -f stop.nft
         '';
+
+        RuntimeDirectory = "new-firewall";
+        Type = "oneshot";
+        RemainAfterExit = "true";
       };
     };
 
-    build.debug.nftables.rulesetFile = firewallRules;
+    build.debug.nftables = {
+      rulesetFile = firewallRules;
+      chains = createdChainsJSON;
+      hooks = hooksJSON;
+    };
   };
 }
