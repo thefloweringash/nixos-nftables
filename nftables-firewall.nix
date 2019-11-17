@@ -285,6 +285,7 @@ in
           #!${pkgs.runtimeShell} -e
           nft --check -f ${firewallRules}
           cat ${firewallRules} ${startRules} | nft -f -
+          ln -sfT ${createdChainsJSON} startup-chains.json
         '';
         ExecReload = pkgs.writeScript "firewall-reload" ''
           #!${pkgs.runtimeShell} -e
@@ -294,12 +295,20 @@ in
 
           nft --json list ruleset > state.json
 
+          nft-util remove-stale-chains \
+            --state state.json \
+            --old-chains startup-chains.json \
+            --chains ${createdChainsJSON} \
+            > cleanup.nft
+
           nft-util ensure-hooks \
             --state state.json \
             --hooks ${hooksJSON} \
             > ensure.nft
 
-          cat ${firewallRules} ensure.nft | nft -f -
+          cat ${firewallRules} cleanup.nft ensure.nft | nft -f -
+
+          ln -sfT ${createdChainsJSON} startup-chains.json
         '';
         ExecStop = pkgs.writeScript "firewall-stop" ''
           #!${pkgs.runtimeShell} -e
@@ -309,7 +318,7 @@ in
 
           nft-util remove-chains \
             --state state.json \
-            --chains ${createdChainsJSON} \
+            --chains startup-chains.json \
             > stop.nft
 
           nft -f stop.nft
