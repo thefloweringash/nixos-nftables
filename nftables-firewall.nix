@@ -290,6 +290,10 @@ in
       # Hooks attach global chains to the declarative chains in
       # `chains`.
       hooks = mkOption { type = types.listOf (types.submodule hookType); };
+
+      # TODO: these can be a single structure. A hook may only be
+      # created from a global chain to a nixos managed chain. We
+      # should put the hook registration into the chain definition.
     };
   };
 
